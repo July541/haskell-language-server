@@ -15,19 +15,17 @@ module Development.IDE.Plugin.TypeLenses (
 
 import           Control.Concurrent.STM.Stats        (atomically)
 import           Control.DeepSeq                     (rwhnf)
-import           Control.Monad                       (mzero)
-import           Control.Monad.Extra                 (whenMaybe)
+import           Control.Monad                       (join)
 import           Control.Monad.IO.Class              (MonadIO (liftIO))
 import           Data.Aeson.Types                    (Value (..), toJSON)
 import qualified Data.Aeson.Types                    as A
 import qualified Data.HashMap.Strict                 as Map
 import           Data.List                           (find)
-import           Data.Maybe                          (catMaybes)
+import           Data.Maybe                          (catMaybes, fromMaybe)
 import qualified Data.Text                           as T
-import           Development.IDE                     (GhcSession (..),
-                                                      HscEnvEq (hscEnv),
-                                                      RuleResult, Rules, define,
-                                                      srcSpanToRange)
+import           Development.IDE                     (RuleResult, Rules, define,
+                                                      srcSpanToRange,
+                                                      tmrModSummary)
 import           Development.IDE.Core.Compile        (TcModuleResult (..))
 import           Development.IDE.Core.RuleTypes      (GetBindings (GetBindings),
                                                       TypeCheck (TypeCheck))
@@ -47,10 +45,16 @@ import           Development.IDE.Types.Logger        (Pretty (pretty), Recorder,
                                                       WithPriority,
                                                       cmapWithPrio)
 import           GHC.Generics                        (Generic)
-import           Ide.Plugin.Config                   (Config)
-import           Ide.Plugin.Properties
-import           Ide.PluginUtils                     (mkLspCommand,
-                                                      usePropertyLsp)
+import           GhcPlugins                          (GlobalRdrEnv, SDoc,
+                                                      elemNameSet, emptyTidyEnv,
+                                                      getSrcSpan, idName,
+                                                      lookupTypeEnv,
+                                                      tidyOpenType)
+import           HscTypes                            (mkPrintUnqualified)
+import           Ide.Plugin.Config                   (Config,
+                                                      PluginConfig (plcConfig))
+import           Ide.PluginUtils                     (getPluginConfig,
+                                                      mkLspCommand)
 import           Ide.Types                           (CommandFunction,
                                                       CommandId (CommandId),
                                                       PluginCommand (PluginCommand),
@@ -71,6 +75,10 @@ import           Language.LSP.Types                  (ApplyWorkspaceEditParams (
                                                       TextDocumentIdentifier (TextDocumentIdentifier),
                                                       TextEdit (TextEdit),
                                                       WorkspaceEdit (WorkspaceEdit))
+import           Outputable                          (showSDocForUser)
+import           PatSyn                              (patSynName)
+import           TcRnTypes                           (TcGblEnv (..))
+import           TcType                              (pprSigmaType)
 import           Text.Regex.TDFA                     ((=~), (=~~))
 
 data Log = LogShake Shake.Log deriving Show
@@ -254,32 +262,38 @@ rules :: Recorder (WithPriority Log) -> Rules ()
 rules recorder = do
   define (cmapWithPrio LogShake recorder) $ \GetGlobalBindingTypeSigs nfp -> do
     tmr <- use TypeCheck nfp
-    -- we need session here for tidying types
-    hsc <- use GhcSession nfp
-    result <- liftIO $ gblBindingType (hscEnv <$> hsc) (tmrTypechecked <$> tmr)
+    result <- liftIO $ gblBindingType (ms_hspp_opts . tmrModSummary <$> tmr) (tmrTypechecked <$> tmr)
     pure ([], result)
 
-gblBindingType :: Maybe HscEnv -> Maybe TcGblEnv -> IO (Maybe GlobalBindingTypeSigsResult)
-gblBindingType (Just hsc) (Just gblEnv) = do
+parseCustomConfig :: A.Object -> Maybe Mode
+parseCustomConfig = A.parseMaybe (A..: "mode")
+
+gblBindingType :: Maybe DynFlags -> Maybe TcGblEnv -> IO (Maybe GlobalBindingTypeSigsResult)
+gblBindingType (Just dflags) (Just gblEnv) = do
   let exports = availsToNameSet $ tcg_exports gblEnv
       sigs = tcg_sigs gblEnv
       binds = collectHsBindsBinders $ tcg_binds gblEnv
       patSyns = tcg_patsyns gblEnv
       rdrEnv = tcg_rdr_env gblEnv
-      showDoc = showDocRdrEnv hsc rdrEnv
-      hasSig :: (Monad m) => Name -> m a -> m (Maybe a)
-      hasSig name f = whenMaybe (name `elemNameSet` sigs) f
-      bindToSig id = do
-        let name = idName id
-        hasSig name $ do
-          env <- tcInitTidyEnv
-          let (_, ty) = tidyOpenType env (idType id)
-          pure $ GlobalBindingTypeSig name (printName name <> " :: " <> showDoc (pprSigmaType ty)) (name `elemNameSet` exports)
-      patToSig p = do
-        let name = patSynName p
-        hasSig name $ pure $ GlobalBindingTypeSig name ("pattern " <> printName name <> " :: " <> showDoc (pprPatSynTypeWithoutForalls p)) (name `elemNameSet` exports)
-  (_, maybe [] catMaybes -> bindings) <- initTcWithGbl hsc gblEnv (realSrcLocSpan $ mkRealSrcLoc "<dummy>" 1 1) $ mapM bindToSig binds
-  patterns <- catMaybes <$> mapM patToSig patSyns
+      showDoc = showDocRdrEnv dflags rdrEnv
+      hasSig name = name `elemNameSet` sigs
+      isExported name = name `elemNameSet` exports
+      prettyPrintTy ty = showDoc (pprSigmaType ty)
+      bindToSig id
+        | name <- idName id
+          , hasSig name
+          , env <- emptyTidyEnv
+          , (_, ty) <- tidyOpenType env (idType id) =
+          Just $ GlobalBindingTypeSig name (printName name <> " :: " <> prettyPrintTy ty) (isExported name)
+        | otherwise = Nothing
+      patToSig p
+        | name <- patSynName p
+            -- we don't use pprPatSynType, since it always prints forall
+          , Just ty <-lookupTypeEnv (tcg_type_env gblEnv) name >>= safeTyThingType =
+          Just $ GlobalBindingTypeSig name ("pattern " <> printName name <> " :: " <> prettyPrintTy ty) (isExported name)
+        | otherwise = Nothing
+  let bindings = catMaybes $ bindToSig <$> binds
+      patterns = catMaybes $ patToSig <$> patSyns
   pure . Just . GlobalBindingTypeSigsResult $ bindings <> patterns
 gblBindingType _ _ = pure Nothing
 
