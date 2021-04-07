@@ -46,10 +46,8 @@ import           Development.IDE.Types.Logger        (Pretty (pretty), Recorder,
                                                       cmapWithPrio)
 import           GHC.Generics                        (Generic)
 import           GhcPlugins                          (GlobalRdrEnv, SDoc,
-                                                      elemNameSet, emptyTidyEnv,
-                                                      getSrcSpan, idName,
-                                                      lookupTypeEnv,
-                                                      tidyOpenType)
+                                                      elemNameSet, getSrcSpan,
+                                                      idName, lookupTypeEnv)
 import           HscTypes                            (mkPrintUnqualified)
 import           Ide.Plugin.Config                   (Config,
                                                       PluginConfig (plcConfig))
