@@ -98,19 +98,23 @@ descriptor recorder plId =
     }
 
 properties :: Properties '[ 'PropertyKey "mode" ('TEnum Mode)]
-properties = emptyProperties
-  & defineEnumProperty #mode "Control how type lenses are shown"
-    [ (Always, "Always displays type lenses of global bindings")
-    , (Exported, "Only display type lenses of exported global bindings")
-    , (Diagnostics, "Follows error messages produced by GHC about missing signatures")
-    ] Always
+properties =
+  emptyProperties
+    & defineEnumProperty
+      #mode
+      "Control how type lenses are shown"
+      [ (Always, "Always displays type lenses of global bindings"),
+        (Exported, "Only display type lenses of exported global bindings"),
+        (Diagnostics, "Follows error messages produced by GHC about missing signatures")
+      ]
+      Always
 
 codeLensProvider ::
   IdeState ->
   PluginId ->
   CodeLensParams ->
   LSP.LspM Config (Either ResponseError (List CodeLens))
-codeLensProvider ideState pId CodeLensParams{_textDocument = TextDocumentIdentifier uri} = do
+codeLensProvider ideState pId CodeLensParams {_textDocument = TextDocumentIdentifier uri} = do
   mode <- usePropertyLsp #mode pId properties
   fmap (Right . List) $ case uriToFilePath' uri of
     Just (toNormalizedFilePath' -> filePath) -> liftIO $ do
@@ -123,7 +127,7 @@ codeLensProvider ideState pId CodeLensParams{_textDocument = TextDocumentIdentif
       hDiag <- atomically $ getHiddenDiagnostics ideState
 
       let toWorkSpaceEdit tedit = WorkspaceEdit (Just $ Map.singleton uri $ List tedit) Nothing Nothing
-          generateLensForGlobal sig@GlobalBindingTypeSig{..} = do
+          generateLensForGlobal sig@GlobalBindingTypeSig {..} = do
             range <- srcSpanToRange $ gbSrcSpan sig
             tedit <- gblBindingTypeSigToEdit sig
             let wedit = toWorkSpaceEdit [tedit]
@@ -132,10 +136,10 @@ codeLensProvider ideState pId CodeLensParams{_textDocument = TextDocumentIdentif
           generateLensFromDiags f =
             sequence
               [ pure $ generateLens pId _range title edit
-              | (dFile, _, dDiag@Diagnostic{_range = _range}) <- diag ++ hDiag
-              , dFile == filePath
-              , (title, tedit) <- f dDiag
-              , let edit = toWorkSpaceEdit tedit
+                | (dFile, _, dDiag@Diagnostic {_range = _range}) <- diag ++ hDiag,
+                  dFile == filePath,
+                  (title, tedit) <- f dDiag,
+                  let edit = toWorkSpaceEdit tedit
               ]
 
       case mode of
@@ -163,14 +167,14 @@ suggestSignature isQuickFix env mGblSigs mTmr mBindings diag =
   suggestGlobalSignature isQuickFix mGblSigs diag <> suggestLocalSignature isQuickFix env mTmr mBindings diag
 
 suggestGlobalSignature :: Bool -> Maybe GlobalBindingTypeSigsResult -> Diagnostic -> [(T.Text, [TextEdit])]
-suggestGlobalSignature isQuickFix mGblSigs Diagnostic{_message, _range}
+suggestGlobalSignature isQuickFix mGblSigs Diagnostic {_message, _range}
   | _message
-      =~ ("(Top-level binding|Pattern synonym) with no type signature" :: T.Text)
-    , Just (GlobalBindingTypeSigsResult sigs) <- mGblSigs
-    , Just sig <- find (\x -> sameThing (gbSrcSpan x) _range) sigs
-    , signature <- T.pack $ gbRendered sig
-    , title <- if isQuickFix then "add signature: " <> signature else signature
-    , Just action <- gblBindingTypeSigToEdit sig =
+      =~ ("(Top-level binding|Pattern synonym) with no type signature" :: T.Text),
+    Just (GlobalBindingTypeSigsResult sigs) <- mGblSigs,
+    Just sig <- find (\x -> sameThing (gbSrcSpan x) _range) sigs,
+    signature <- T.pack $ gbRendered sig,
+    title <- if isQuickFix then "add signature: " <> signature else signature,
+    Just action <- gblBindingTypeSigToEdit sig =
     [(title, [action])]
   | otherwise = []
 
@@ -201,10 +205,10 @@ sameThing :: SrcSpan -> Range -> Bool
 sameThing s1 s2 = (_start <$> srcSpanToRange s1) == (_start <$> Just s2)
 
 gblBindingTypeSigToEdit :: GlobalBindingTypeSig -> Maybe TextEdit
-gblBindingTypeSigToEdit GlobalBindingTypeSig{..}
-  | Just Range{..} <- srcSpanToRange $ getSrcSpan gbName
-    , startOfLine <- Position (_line _start) 0
-    , beforeLine <- Range startOfLine startOfLine =
+gblBindingTypeSigToEdit GlobalBindingTypeSig {..}
+  | Just Range {..} <- srcSpanToRange $ getSrcSpan gbName,
+    startOfLine <- Position (_line _start) 0,
+    beforeLine <- Range startOfLine startOfLine =
     Just $ TextEdit beforeLine $ T.pack gbRendered <> "\n"
   | otherwise = Nothing
 
@@ -238,13 +242,13 @@ data GetGlobalBindingTypeSigs = GetGlobalBindingTypeSigs
   deriving (Generic, Show, Eq, Ord, Hashable, NFData)
 
 data GlobalBindingTypeSig = GlobalBindingTypeSig
-  { gbName     :: Name
-  , gbRendered :: String
-  , gbExported :: Bool
+  { gbName     :: Name,
+    gbRendered :: String,
+    gbExported :: Bool
   }
 
 gbSrcSpan :: GlobalBindingTypeSig -> SrcSpan
-gbSrcSpan GlobalBindingTypeSig{gbName} = getSrcSpan gbName
+gbSrcSpan GlobalBindingTypeSig {gbName} = getSrcSpan gbName
 
 newtype GlobalBindingTypeSigsResult = GlobalBindingTypeSigsResult [GlobalBindingTypeSig]
 
@@ -260,15 +264,13 @@ rules :: Recorder (WithPriority Log) -> Rules ()
 rules recorder = do
   define (cmapWithPrio LogShake recorder) $ \GetGlobalBindingTypeSigs nfp -> do
     tmr <- use TypeCheck nfp
-    result <- liftIO $ gblBindingType (ms_hspp_opts . tmrModSummary <$> tmr) (tmrTypechecked <$> tmr)
+    let result = gblBindingType (ms_hspp_opts . tmrModSummary <$> tmr) (tmrTypechecked <$> tmr)
     pure ([], result)
 
-parseCustomConfig :: A.Object -> Maybe Mode
-parseCustomConfig = A.parseMaybe (A..: "mode")
-
-gblBindingType :: Maybe DynFlags -> Maybe TcGblEnv -> IO (Maybe GlobalBindingTypeSigsResult)
-gblBindingType (Just dflags) (Just gblEnv) = do
+gblBindingType :: Maybe DynFlags -> Maybe TcGblEnv -> Maybe GlobalBindingTypeSigsResult
+gblBindingType (Just dflags) (Just gblEnv) =
   let exports = availsToNameSet $ tcg_exports gblEnv
+      sigs = tcg_sigs gblEnv
       binds = collectHsBindsBinders $ tcg_binds gblEnv
       patSyns = tcg_patsyns gblEnv
       rdrEnv = tcg_rdr_env gblEnv
@@ -277,17 +279,19 @@ gblBindingType (Just dflags) (Just gblEnv) = do
       isExported name = name `elemNameSet` exports
       prettyPrintTy ty = showDoc (pprSigmaType ty)
       bindToSig id
-        | name <- idName id
-          , Just ty <- lookupTypeEnv tyEnv name >>= safeTyThingType =
+        | name <- idName id,
+          name `elemNameSet` sigs,
+          Just ty <- lookupTypeEnv tyEnv name >>= safeTyThingType =
           Just $ GlobalBindingTypeSig name (printName name <> " :: " <> prettyPrintTy ty) (isExported name)
         | otherwise = Nothing
       patToSig p
-        | name <- patSynName p
-            -- we don't use pprPatSynType, since it always prints forall
-          , Just ty <- lookupTypeEnv tyEnv name >>= safeTyThingType =
+        | name <- patSynName p,
+          name `elemNameSet` sigs,
+          -- we don't use pprPatSynType, since it always prints forall
+          Just ty <- lookupTypeEnv tyEnv name >>= safeTyThingType =
           Just $ GlobalBindingTypeSig name ("pattern " <> printName name <> " :: " <> prettyPrintTy ty) (isExported name)
         | otherwise = Nothing
-  let bindings = catMaybes $ bindToSig <$> binds
+      bindings = catMaybes $ bindToSig <$> binds
       patterns = catMaybes $ patToSig <$> patSyns
   pure . Just . GlobalBindingTypeSigsResult $ bindings <> patterns
 gblBindingType _ _ = pure Nothing
