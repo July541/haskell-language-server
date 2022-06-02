@@ -193,6 +193,7 @@ module Development.IDE.GHC.Compat.Core (
     ImportedModsVal(..),
     importedByUser,
     GHC.TypecheckedSource,
+    lookupTypeEnv,
     -- * Source Locations
     HasSrcSpan,
     SrcLoc.Located,
@@ -587,6 +588,7 @@ import           GHC.Types.SourceText
 import           GHC.Types.Target             (Target (..), TargetId (..))
 import           GHC.Types.TyThing
 import           GHC.Types.TyThing.Ppr
+import           GHC.Types.TypeEnv            (lookupTypeEnv)
 #else
 import           GHC.Types.Name.Set
 #endif
